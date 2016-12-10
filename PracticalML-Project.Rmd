@@ -1,0 +1,298 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Yiannis Manatos"
+date: "December 11, 2016"
+output: html_document
+subtitle: Practical Machine Learning Course Peer Graded Assignment
+---
+
+*****  
+
+# Synopsis
+
+This report analyzes data collected from belt, forearm, arm, and dumbbell accelerometers of 6 participants, in order to predict the manner in which they did their exercise. Participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes.  
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or just because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants, and predict the manner in which participants did the exercise. The $classe$ variable in the training set takes on 1 of the 5 Classes (i.e. $A$, $B$, $C$, $D$, $E$).  
+
+More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+## Data
+
+The training data for this project are available here: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv. 
+
+The test data are available here: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. If you use the document you create for this class for any purpose please cite them as they have been very generous in allowing their data to be used for this kind of assignment.
+
+
+
+*****  
+\newpage  
+
+# Data loading and pre-processing
+
+```{r init, echo=FALSE, results='hide', warning=FALSE, message=FALSE}
+memory.limit(3072)
+
+# Libraries loading
+library(caret)
+library(rpart)          # required package for CART model training
+library(randomForest)   # required package for RF model training
+#library(ggplot2)
+#library(reshape2)
+#library(gridExtra)
+#library(knitr)
+```
+```{r init0, echo=TRUE}
+# Data setup
+data.training <- read.csv("pml-training.csv", header = TRUE, sep = ",")
+data.testing <- read.csv("pml-testing.csv", header = TRUE, sep = ",")
+```
+
+```{r init1, echo=FALSE, results=FALSE, warning=FALSE}
+user_names <- levels(data.training$user_name)
+classes <- levels(data.training$classe)
+```
+**Training set** basic properties inspection is shown at Appendix #1. We see $`r nrow(data.training)`$ samples from $`r length(user_names)`$ individuals (`r user_names`), where the $classe$ factor variable can take any of the values $`r classes`$.
+
+```{r init2, echo=FALSE, results=FALSE, warning=FALSE}
+user_names <- levels(data.testing$user_name)
+m1 <- min(data.testing$problem_id)
+m2 <- max(data.testing$problem_id)
+```
+**Testing set** is shown at Appendix #2. We see $`r nrow(data.testing)`$ samples from the same $`r length(user_names)`$ individuals (`r user_names`), where the $classe$ variable has been replaced by a $problem\_id$ integer variable with incremental values in the range $`r m1` - `r m2`$.
+
+## Remove some variables
+
+Then, it is observed that the first $X$ variable is an incremental row counter, in both sets. And the remained variables are either numeric/integer or categorical (factor) variables. The categorical variables most probably indicate several sensor devices settings, so we remove them from both data sets prior to data analysis. We also remove the $X$ row counters. The categorical variables to be removed from both data sets, are:
+```{r init3, echo=TRUE, results=FALSE, warning=FALSE}
+# Identify all categorical (factor) variable names
+factor.vars <- split(names(data.training), sapply(data.training, function(x) 
+    paste(class(x), collapse=" ")))$factor
+print(factor.vars <- factor.vars[-which(factor.vars == 'classe')])
+```
+
+From those, we keep only the $classe$ training variable while we also remove the $problem\_id$ testing variable.
+```{r init4, echo=TRUE, results=FALSE, warning=FALSE}
+# Remove some variables
+training <- data.training[, -which(names(data.training) %in% 
+                                       c('X', factor.vars))]
+testing <- data.testing[, -which(names(data.testing) %in% 
+                                     c('X', factor.vars, 'problem_id'))]
+```
+
+## Remove N/A variables
+
+```{r init5, echo=TRUE, results=FALSE, warning=FALSE}
+# Remove N/A and blank variables
+print(na.vars <- names(which(sapply(training, function(x) length(which(is.na(x)))!=0))))
+```
+From the remained variables, we identify $`r length(na.vars)`$ variables with $N/A$ values, and remove them as well:
+```{r init5b, echo=TRUE, results=FALSE, warning=FALSE}
+# Remove N/A and blank variables
+training <- training[, -which(names(training) %in% na.vars)]
+testing <- testing[, -which(names(testing) %in% na.vars)]
+```
+
+\newpage  
+
+## Final variables to remove
+
+From the remained variables, the $raw\_timestamp\_part\_1$, $raw\_timestamp\_part\_2$, and $num\_window$ variables are also selected to be removed as they carry not measured values:
+```{r init6, echo=TRUE, results=FALSE, warning=FALSE}
+# Remove some more variables
+print(somemore.vars <- c('raw_timestamp_part_1', 'raw_timestamp_part_2', 'num_window'))
+training <- training[, -which(names(training) %in% somemore.vars)]
+testing <- testing[, -which(names(testing) %in% somemore.vars)]
+```
+
+Then, the remaining variables to work with, are:
+
+ - $`r length(names(training))-1`$ predictor variables, and
+ - the $classe$ classifier (predicted variable):
+```{r init7, echo=TRUE, results=FALSE, warning=FALSE}
+# Variables to work with
+names(training)
+dim(training)
+dim(testing)
+```
+
+
+
+*****  
+
+# Data Processing
+
+```{r proc, echo=TRUE, results=FALSE}
+# Set some working settings
+part_perc <- 0.7        # partition percentage
+modelFitNbr <- 10       # Model(s) fit number
+rf_ntrees <- 100        # Number of trees to grow (random forest model)
+rf_ntrees.tune <- 500   # Number of trees to grow (when tuning)
+seed0 <- 1235           # Random seeding value
+```
+
+
+## Data partitioning
+
+Before creating our model, we split the training data set into a working training set with the 70% of the samples, and a validation set with the remaining 30% of the training samples.  
+```{r proc0, echo=TRUE, results=FALSE, warning=FALSE}
+# Split training data set, create a validation set
+featuresPartition <- createDataPartition(y = training$classe, p = part_perc, list = FALSE)
+training.train <- training[featuresPartition,]
+training.validate <- training[-featuresPartition,]
+dim(training.train)
+dim(training.validate)
+```
+
+This creates a new training set with $`r nrow(training.train)`$ entries and a new validation set with $`r nrow(training.validate)`$ entries, out of our original training set. The plan is to use the working training set for training our model and the validation set to test (and fine tune) it, before applying it to the original testing set.
+
+
+## Model selection
+
+In order to select the optimal prediction model, we will create several different models, train them, and measure their predictions accuracy (using the working training and validation data sets as created above). Then, we will select the optimal accuracy model to proceed with. The candidate models to test are:
+
+ - Decision tree model, or CART (Classification And Regression Tree), and
+ - Random Forest model.
+```{r proc1, echo=TRUE, results=FALSE, warning=FALSE}
+# Model selection process
+fitControl <- trainControl(method = "cv", number = modelFitNbr)
+# train the models
+set.seed(seed0)
+model.CART <- train(classe ~ ., data = training.train, trControl = fitControl, method = "rpart")
+set.seed(seed0)
+model.RF <- train(classe ~ ., data = training.train, trControl = fitControl, method = "rf", 
+                  ntree = rf_ntrees)
+```
+(*) Note: Training the models is quite computational demanding.
+
+\newpage  
+After training the models, we use them in order to predict the (known to us) validation set classifier variable and measure their prediction accuracy:
+```{r proc2, echo=TRUE, results=FALSE, warning=FALSE}
+# Models prediction accuracy
+pred.CART <- predict(model.CART, newdata = training.validate)
+pred.RF <- predict(model.RF, newdata = training.validate)
+# measure predictions accuracy
+cm.CART <- confusionMatrix(pred.CART, training.validate$classe)
+cm.RF <- confusionMatrix(pred.RF, training.validate$classe)
+# compare models accuracy
+print(accuracy.comp <- data.frame(Model = c('CART', 'RF'), 
+                                  Accuracy = rbind(round(cm.CART$overall[1],3), 
+                                                   round(cm.RF$overall[1],3))))
+```
+
+Based on the above models accuracy comparison table, **we choose to proceed with the Random Forest model**.
+
+
+## Validation Out-of-Sample Error
+
+```{r proc3, echo=TRUE, results=FALSE, warning=FALSE}
+# Validation predictions accuracy table
+table(pred.RF, training.validate$classe)
+# Validation Out-of-Sample Error
+correct.predictions <- sum(pred.RF == training.validate$classe)
+wrong.predictions <- sum(pred.RF != training.validate$classe)
+OoSError <- 1 - correct.predictions / nrow(training.validate)
+```
+
+Our model correctly predicted $`r correct.predictions`$ while it missed $`r wrong.predictions`$ values of the validation data set. This corresponds to a $`r OoSError`$ (or $`r round(OoSError * 100, 2)`\%$) out-of-sample error.
+
+
+\newpage  
+
+## Model tuning
+
+```{r proc4, echo=TRUE, results=FALSE, warning=FALSE, fig.width=10, fig.height=5}
+# Random Forest model tuning
+set.seed(seed0)
+bestmtry <- tuneRF(training.train[-which(names(training.train) == 'classe')], 
+                   training.train$classe, ntreeTry = rf_ntrees, 
+                   stepFactor = 1.5, improve = 0.01, 
+                   trace = TRUE, plot = TRUE, dobest = FALSE)
+best.mtry <- bestmtry[as.numeric(which.min(bestmtry[, "OOBError"])),"mtry"]
+best.OOBError <- bestmtry[as.numeric(which.min(bestmtry[, "OOBError"])),"OOBError"]
+```
+
+As shown at the above $tuneRF()$ diagram, the $mtry$ value $`r best.mtry`$ gives the lowest OOB Error ($`r best.OOBError`$). So, our random forest model will be tuned based on this:
+```{r proc5, echo=TRUE, results=FALSE, warning=FALSE}
+set.seed(seed0)
+# Model tuning
+model.tuned <- randomForest(classe ~ ., data = training.validate, mtry = best.mtry, 
+                            ntree = rf_ntrees.tune, keep.forest = TRUE, proximity = TRUE, 
+                            importance = TRUE, test = training.validate)
+model.tuned
+```
+
+```{r proc6, echo=TRUE, results=FALSE, warning=FALSE, fig.width=10, fig.height=7}
+# Plot the Out-of-bag error estimates 
+layout(matrix(c(1, 2), nrow = 1), width = c(4, 1)) 
+par(mar = c(5, 4, 4, 0))
+plot(model.tuned, log = "y", main = "Out-of-bag (OOB) class.error estimate by # trees") 
+par(mar = c(5, 0, 4, 2)) 
+plot(c(0, 1), type = "n", axes = F, xlab = "# of trees", ylab = "Class. error") 
+legend("top", colnames(model.tuned$err.rate), col = 1:6, cex = 0.8, fill = 1:6)
+```
+
+
+\newpage  
+
+## Variable importance
+
+We can also see the model variables' importance at the following Variable Importance Plot:
+```{r proc7, echo=TRUE, results=FALSE, warning=FALSE, fig.width=10, fig.height=10}
+# Variable Importance Plot
+varImpPlot(model.tuned, main="Variable Importance Plot\n(tuned random forest model)")
+```
+
+
+
+*****  
+\newpage  
+
+# Testing set prediction
+
+Finally, we apply the model built on the original testing data set, in order to predict the $`r nrow(testing)`$ samples' $classe$ variable:
+```{r pred0, echo=TRUE, results=FALSE, warning=FALSE}
+# Testing set prediction
+predictions <- predict(model.tuned, newdata = testing)
+data.frame('Classe(Predicted)' = predictions)
+```
+
+
+
+*****  
+\newpage  
+
+# Appendix #1
+
+## Training set inspection
+
+```{r section0a, echo=TRUE}
+# Instant data touching
+levels(data.training$user_name)
+levels(data.training$classe)
+
+str(data.training, list.len = 999)
+summary(data.training)
+```
+
+*****  
+\newpage  
+
+# Appendix #2
+
+## Testing set inspection
+
+```{r section0b, echo=TRUE}
+# Instant data touching
+levels(data.testing$user_name)
+data.testing$problem_id
+
+str(data.testing, list.len = 999)
+summary(data.testing)
+```
+
+*****  
+
+
+##-- End of document --
